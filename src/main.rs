@@ -1,20 +1,33 @@
+use rdev::{listen, Event, EventType, Key};
+#[cfg(target_os = "linux")]
+use evdev::{Device, InputEventKind, Key as EvKey};
 use rdev::{listen, simulate, Event, EventType, Key};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
+#[cfg(target_os = "macos")]
 use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
 use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
 use core_foundation_sys::base::CFTypeRef;
+#[cfg(target_os = "macos")]
 use core_foundation_sys::string::CFStringRef;
 
 // FFI bindings to macOS Text Input Source (TIS) APIs from the Carbon framework.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct __TISInputSource;
+#[cfg(target_os = "macos")]
 type TISInputSourceRef = *mut __TISInputSource;
 
-#[link(name = "Carbon", kind = "framework")]
+#[cfg(target_os = "macos")]
+#[link(name = "Carbon")]
 extern "C" {
     fn TISCopyInputSourceForLanguage(language: CFStringRef) -> TISInputSourceRef;
     fn TISSelectInputSource(source: TISInputSourceRef) -> i32; // OSStatus
@@ -52,6 +65,47 @@ fn main() {
 
     let current_keys = Arc::new(Mutex::new(Vec::new()));
 
+    #[cfg(target_os = "macos")]
+    {
+        // Clone for the callback closure
+        let en_dict_cb = en_dict.clone();
+        let he_dict_cb = he_dict.clone();
+        let word_en_cb = Arc::clone(&word_en);
+        let word_he_cb = Arc::clone(&word_he);
+
+        let callback = move |event: Event| {
+            let mut word_en = word_en_cb.lock().unwrap();
+            let mut word_he = word_he_cb.lock().unwrap();
+
+            match event.event_type {
+                EventType::KeyPress(key) => match key {
+                    Key::Space | Key::Return => {
+                        if !word_en.is_empty() || !word_he.is_empty() {
+                            println!(
+                                "Word finished. EN candidate: '{}', HE candidate: '{}'",
+                                *word_en, *word_he
+                            );
+                            check_and_switch_candidates(
+                                &word_en,
+                                &word_he,
+                                &en_dict_cb,
+                                &he_dict_cb,
+                            );
+                            word_en.clear();
+                            word_he.clear();
+                        }
+                    }
+                    Key::Backspace => {
+                        word_en.pop();
+                        word_he.pop();
+                    }
+                    _ => {
+                        if let Some(ch) = key_to_english_char(key) {
+                            word_en.push(ch);
+                        }
+                        if let Some(ch) = key_to_hebrew_char(key) {
+                            word_he.push(ch);
+                        }
     // Clone for the callback closure
     let en_dict_cb = en_dict.clone();
     let he_dict_cb = he_dict.clone();
@@ -91,16 +145,29 @@ fn main() {
                     if key_to_english_char(key).is_some() || key_to_hebrew_char(key).is_some() {
                         keys.push(key);
                     }
-                }
-            },
-            EventType::KeyRelease(_) => {}
-            _ => {}
-        }
-    };
+                },
+                EventType::KeyRelease(_) => {}
+                _ => {}
+            }
+        };
 
-    println!("Listening for keyboard events. Press Space or Enter to check a word.");
-    if let Err(err) = listen(callback) {
-        eprintln!("Error while listening for keyboard events: {:?}", err);
+        println!("Listening for keyboard events. Press Space or Enter to check a word.");
+        if let Err(err) = listen(callback) {
+            eprintln!("Error while listening for keyboard events: {:?}", err);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Capture Hyprland instance signature (if available) for use when running under sudo.
+        if let Err(err) = capture_hypr_signature() {
+            eprintln!("Warning: could not capture Hyprland instance signature: {:?}", err);
+        }
+
+        println!("Listening for keyboard events via evdev. Press Space or Enter to check a word.");
+        if let Err(err) = run_linux_evdev_listener(word_en, word_he, en_dict, he_dict) {
+            eprintln!("Error while listening for keyboard events via evdev: {:?}", err);
+        }
     }
 }
 
@@ -185,6 +252,8 @@ fn replace_word(keys: Vec<Key>, terminating_key: Key) {
     let _ = simulate(&EventType::KeyRelease(terminating_key));
 }
 
+#[cfg(target_os = "macos")]
+fn switch_layout_to(lang: Language) {
 fn switch_layout_to(lang: Language) -> bool {
     let code = match lang {
         Language::English => "en",
@@ -221,6 +290,248 @@ fn switch_layout_to(lang: Language) -> bool {
         CFRelease(src as CFTypeRef);
 
         switched
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn switch_layout_to(lang: Language) {
+    // This assumes your Hyprland config sets:
+    //   kb_layout = us,il
+    // so index 0 = English (us), index 1 = Hebrew (il).
+    let index = match lang {
+        Language::English => 0_i32,
+        Language::Hebrew => 1_i32,
+    };
+
+    println!(
+        "Attempting to switch Hyprland keyboard layout via hyprctl switchxkblayout current {}",
+        index
+    );
+
+    let mut cmd = Command::new("hyprctl");
+    cmd.arg("switchxkblayout")
+        .arg("current")
+        .arg(index.to_string());
+
+    // When running under sudo, Hyprland env vars may not be set.
+    // If we have previously captured them, inject them into the environment.
+    if let Ok(env) = std::fs::read_to_string(".hypr_env") {
+        for line in env.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim();
+                let val = v.trim();
+                if !key.is_empty() && !val.is_empty() {
+                    cmd.env(key, val);
+                }
+            }
+        }
+    }
+
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            println!(
+                "Switched Hyprland keyboard layout to index {} ({}).",
+                index,
+                match lang {
+                    Language::English => "English/us",
+                    Language::Hebrew => "Hebrew/il",
+                }
+            );
+        }
+        Ok(status) => {
+            eprintln!(
+                "hyprctl exited with status code {:?} while switching xkb layout to index {}",
+                status.code(),
+                index
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "Failed to execute hyprctl switchxkblayout current {}: {}. \
+Ensure hyprctl is installed and kb_layout is configured as 'us,il'.",
+                index,
+                err
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_hypr_signature() -> io::Result<()> {
+    let mut lines = Vec::new();
+
+    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        lines.push(format!("HYPRLAND_INSTANCE_SIGNATURE={}", sig));
+    }
+
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        lines.push(format!("XDG_RUNTIME_DIR={}", runtime));
+    }
+
+    if !lines.is_empty() {
+        std::fs::write(".hypr_env", lines.join("\n"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_evdev_listener(
+    word_en: Arc<Mutex<String>>,
+    word_he: Arc<Mutex<String>>,
+    en_dict: HashSet<String>,
+    he_dict: HashSet<String>,
+) -> io::Result<()> {
+    use std::fs;
+
+    let mut devices = Vec::new();
+    for entry in fs::read_dir("/dev/input")? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.to_string_lossy().contains("event") {
+            continue;
+        }
+
+        if let Ok(dev) = Device::open(&path) {
+            if dev.supported_keys().map_or(false, |keys| {
+                keys.contains(EvKey::KEY_A) || keys.contains(EvKey::KEY_SPACE)
+            }) {
+                println!("Using input device: {}", path.display());
+                devices.push(dev);
+            }
+        }
+    }
+
+    if devices.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No suitable keyboard input devices found under /dev/input",
+        ));
+    }
+
+    loop {
+        for dev in devices.iter_mut() {
+            for ev in dev.fetch_events()? {
+                if let InputEventKind::Key(key) = ev.kind() {
+                    // value: 1 = key press, 0 = release, 2 = repeat
+                    if ev.value() != 1 {
+                        continue;
+                    }
+
+                    let mut word_en_lock = word_en.lock().unwrap();
+                    let mut word_he_lock = word_he.lock().unwrap();
+
+                    match key {
+                        EvKey::KEY_SPACE | EvKey::KEY_ENTER => {
+                            if !word_en_lock.is_empty() || !word_he_lock.is_empty() {
+                                println!(
+                                    "Word finished. EN candidate: '{}', HE candidate: '{}'",
+                                    *word_en_lock, *word_he_lock
+                                );
+                                check_and_switch_candidates(
+                                    &word_en_lock,
+                                    &word_he_lock,
+                                    &en_dict,
+                                    &he_dict,
+                                );
+                                word_en_lock.clear();
+                                word_he_lock.clear();
+                            }
+                        }
+                        EvKey::KEY_BACKSPACE => {
+                            word_en_lock.pop();
+                            word_he_lock.pop();
+                        }
+                        _ => {
+                            if let Some(ch) = evkey_to_english_char(key) {
+                                word_en_lock.push(ch);
+                            }
+                            if let Some(ch) = evkey_to_hebrew_char(key) {
+                                word_he_lock.push(ch);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn evkey_to_english_char(key: EvKey) -> Option<char> {
+    match key {
+        EvKey::KEY_A => Some('a'),
+        EvKey::KEY_B => Some('b'),
+        EvKey::KEY_C => Some('c'),
+        EvKey::KEY_D => Some('d'),
+        EvKey::KEY_E => Some('e'),
+        EvKey::KEY_F => Some('f'),
+        EvKey::KEY_G => Some('g'),
+        EvKey::KEY_H => Some('h'),
+        EvKey::KEY_I => Some('i'),
+        EvKey::KEY_J => Some('j'),
+        EvKey::KEY_K => Some('k'),
+        EvKey::KEY_L => Some('l'),
+        EvKey::KEY_M => Some('m'),
+        EvKey::KEY_N => Some('n'),
+        EvKey::KEY_O => Some('o'),
+        EvKey::KEY_P => Some('p'),
+        EvKey::KEY_Q => Some('q'),
+        EvKey::KEY_R => Some('r'),
+        EvKey::KEY_S => Some('s'),
+        EvKey::KEY_T => Some('t'),
+        EvKey::KEY_U => Some('u'),
+        EvKey::KEY_V => Some('v'),
+        EvKey::KEY_W => Some('w'),
+        EvKey::KEY_X => Some('x'),
+        EvKey::KEY_Y => Some('y'),
+        EvKey::KEY_Z => Some('z'),
+        EvKey::KEY_1 => Some('1'),
+        EvKey::KEY_2 => Some('2'),
+        EvKey::KEY_3 => Some('3'),
+        EvKey::KEY_4 => Some('4'),
+        EvKey::KEY_5 => Some('5'),
+        EvKey::KEY_6 => Some('6'),
+        EvKey::KEY_7 => Some('7'),
+        EvKey::KEY_8 => Some('8'),
+        EvKey::KEY_9 => Some('9'),
+        EvKey::KEY_0 => Some('0'),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn evkey_to_hebrew_char(key: EvKey) -> Option<char> {
+    match key {
+        EvKey::KEY_Q => Some('ק'),
+        EvKey::KEY_W => Some('ו'),
+        EvKey::KEY_E => Some('ק'), // placeholder; adjust as needed
+        EvKey::KEY_R => Some('ר'),
+        EvKey::KEY_T => Some('ת'),
+        EvKey::KEY_Y => Some('י'),
+        // Adjusted mapping so that the physical key sequence "akuo"
+        // corresponds to the Hebrew word "שלום".
+        EvKey::KEY_U => Some('ו'),
+        EvKey::KEY_I => Some('ט'),
+        EvKey::KEY_O => Some('ם'),
+        EvKey::KEY_P => Some('פ'),
+        EvKey::KEY_A => Some('ש'),
+        EvKey::KEY_S => Some('ד'),
+        EvKey::KEY_D => Some('ג'),
+        EvKey::KEY_F => Some('כ'),
+        EvKey::KEY_G => Some('ע'),
+        EvKey::KEY_H => Some('י'),
+        EvKey::KEY_J => Some('ח'),
+        EvKey::KEY_K => Some('ל'),
+        EvKey::KEY_L => Some('ך'),
+        EvKey::KEY_Z => Some('ז'),
+        EvKey::KEY_X => Some('ס'),
+        EvKey::KEY_C => Some('ב'),
+        EvKey::KEY_V => Some('ה'),
+        EvKey::KEY_B => Some('נ'),
+        EvKey::KEY_N => Some('מ'),
+        EvKey::KEY_M => Some('צ'),
+        _ => None,
     }
 }
 
