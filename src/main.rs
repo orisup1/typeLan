@@ -18,10 +18,11 @@ type TISInputSourceRef = *mut __TISInputSource;
 extern "C" {
     fn TISCopyInputSourceForLanguage(language: CFStringRef) -> TISInputSourceRef;
     fn TISSelectInputSource(source: TISInputSourceRef) -> i32; // OSStatus
+    fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
     fn CFRelease(cf: CFTypeRef);
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Language {
     English,
     Hebrew,
@@ -70,10 +71,6 @@ fn main() {
             EventType::KeyPress(key) => match key {
                 Key::Space | Key::Return => {
                     if !word_en.is_empty() || !word_he.is_empty() {
-                        println!(
-                            "Word finished. EN candidate: '{}', HE candidate: '{}'",
-                            *word_en, *word_he
-                        );
                         check_and_switch_candidates(
                             &word_en,
                             &word_he,
@@ -134,21 +131,41 @@ fn check_and_switch_candidates(
     let is_in_en = !word_en_lower.is_empty() && en_dict.contains(&word_en_lower);
     let is_in_he = !word_he_lower.is_empty() && he_dict.contains(&word_he_lower);
 
-    println!(
-        "Checking candidates. EN='{}' (in EN: {}), HE='{}' (in HE: {})",
-        word_en, is_in_en, word_he, is_in_he
-    );
+    let mut final_en = is_in_en && !is_in_he;
+    let mut final_he = is_in_he && !is_in_en;
 
-    if is_in_en && !is_in_he {
-        println!("Recognized as English word. Selecting English layout.");
-        switch_layout_to(Language::English);
-    } else if is_in_he && !is_in_en {
-        println!("Recognized as Hebrew word. Selecting Hebrew layout.");
-        switch_layout_to(Language::Hebrew);
+    let target_lang = if final_en {
+        Some(Language::English)
+    } else if final_he {
+        Some(Language::Hebrew)
+    } else if !is_in_en && !is_in_he {
+        // Fallback: use script as a heuristic when both are unknown.
+        let looks_hebrew = word_he_lower
+            .chars()
+            .all(|c| (c >= '\u{0590}' && c <= '\u{05FF}') || c == '׳' || c == '״');
+        if looks_hebrew && word_he_lower.chars().count() >= 3 {
+            final_he = true;
+            Some(Language::Hebrew)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    println!("{}", word_en);
+    println!("English: {}", final_en);
+    println!("Hebrew: {}", final_he);
+
+    if let Some(lang) = target_lang {
+        let switched = switch_layout_to(lang);
+        println!("switching: {}", if switched { "True" } else { "False" });
+    } else {
+        println!("switching: False");
     }
 }
 
-fn switch_layout_to(lang: Language) {
+fn switch_layout_to(lang: Language) -> bool {
     let code = match lang {
         Language::English => "en",
         Language::Hebrew => "he",
@@ -160,20 +177,31 @@ fn switch_layout_to(lang: Language) {
 
         if src.is_null() {
             eprintln!("No input source found for language code '{}'", code);
-            return;
+            return false;
         }
 
-        let status = TISSelectInputSource(src);
-        if status != 0 {
-            eprintln!(
-                "TISSelectInputSource failed for '{}' with status {}",
-                code, status
-            );
-        } else {
-            println!("Switched macOS input source to '{}'", code);
+        let current_src = TISCopyCurrentKeyboardInputSource();
+        let mut switched = false;
+
+        // If current source is unknown, or not equal to the target source, we switch
+        if current_src.is_null() || core_foundation_sys::base::CFEqual(src as CFTypeRef, current_src as CFTypeRef) == 0 {
+            let status = TISSelectInputSource(src);
+            if status != 0 {
+                eprintln!(
+                    "TISSelectInputSource failed for '{}' with status {}",
+                    code, status
+                );
+            } else {
+                switched = true;
+            }
         }
 
+        if !current_src.is_null() {
+            CFRelease(current_src as CFTypeRef);
+        }
         CFRelease(src as CFTypeRef);
+
+        switched
     }
 }
 
