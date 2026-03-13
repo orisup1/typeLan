@@ -1,4 +1,4 @@
-use rdev::{listen, Event, EventType, Key};
+use rdev::{listen, simulate, Event, EventType, Key};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -31,11 +31,11 @@ enum Language {
 fn main() {
     println!("Starting typeLan keyboard watcher...");
 
-    // --- Configuration ---
+    // language dictionaries paths
     let en_dict_path = "en_dict.txt";
     let he_dict_path = "he_dict.txt";
 
-    // --- Load Dictionaries ---
+    // loading dictionaries
     let en_dict = load_dictionary(en_dict_path).unwrap_or_else(|e| {
         eprintln!("Warning: Could not load English dictionary: {}", e);
         HashSet::new()
@@ -50,47 +50,46 @@ fn main() {
         return;
     }
 
-    // --- Shared State ---
-    // We build two parallel candidate words based on the physical keys:
-    // - one as if typed on an English layout
-    // - one as if typed on a Hebrew layout
-    let word_en = Arc::new(Mutex::new(String::new()));
-    let word_he = Arc::new(Mutex::new(String::new()));
+    let current_keys = Arc::new(Mutex::new(Vec::new()));
 
     // Clone for the callback closure
     let en_dict_cb = en_dict.clone();
     let he_dict_cb = he_dict.clone();
-    let word_en_cb = Arc::clone(&word_en);
-    let word_he_cb = Arc::clone(&word_he);
+    let keys_cb = Arc::clone(&current_keys);
 
     let callback = move |event: Event| {
-        let mut word_en = word_en_cb.lock().unwrap();
-        let mut word_he = word_he_cb.lock().unwrap();
+        let mut keys = keys_cb.lock().unwrap();
 
         match event.event_type {
             EventType::KeyPress(key) => match key {
                 Key::Space | Key::Return => {
-                    if !word_en.is_empty() || !word_he.is_empty() {
-                        check_and_switch_candidates(
+                    if !keys.is_empty() {
+                        let word_en: String = keys.iter().filter_map(|&k| key_to_english_char(k)).collect();
+                        let word_he: String = keys.iter().filter_map(|&k| key_to_hebrew_char(k)).collect();
+
+                        let switched = check_and_switch_candidates(
                             &word_en,
                             &word_he,
                             &en_dict_cb,
                             &he_dict_cb,
                         );
-                        word_en.clear();
-                        word_he.clear();
+
+                        if switched {
+                            let keys_clone = keys.clone();
+                            std::thread::spawn(move || {
+                                replace_word(keys_clone, key);
+                            });
+                        }
+                        
+                        keys.clear();
                     }
                 }
                 Key::Backspace => {
-                    word_en.pop();
-                    word_he.pop();
+                    keys.pop();
                 }
                 _ => {
-                    if let Some(ch) = key_to_english_char(key) {
-                        word_en.push(ch);
-                    }
-                    if let Some(ch) = key_to_hebrew_char(key) {
-                        word_he.push(ch);
+                    if key_to_english_char(key).is_some() || key_to_hebrew_char(key).is_some() {
+                        keys.push(key);
                     }
                 }
             },
@@ -125,30 +124,19 @@ fn check_and_switch_candidates(
     word_he: &str,
     en_dict: &HashSet<String>,
     he_dict: &HashSet<String>,
-) {
+) -> bool {
     let word_en_lower = word_en.to_lowercase();
     let word_he_lower = word_he.to_lowercase();
     let is_in_en = !word_en_lower.is_empty() && en_dict.contains(&word_en_lower);
     let is_in_he = !word_he_lower.is_empty() && he_dict.contains(&word_he_lower);
 
-    let mut final_en = is_in_en && !is_in_he;
-    let mut final_he = is_in_he && !is_in_en;
+    let final_en = is_in_en && !is_in_he;
+    let final_he = is_in_he && !is_in_en;
 
     let target_lang = if final_en {
         Some(Language::English)
     } else if final_he {
         Some(Language::Hebrew)
-    } else if !is_in_en && !is_in_he {
-        // Fallback: use script as a heuristic when both are unknown.
-        let looks_hebrew = word_he_lower
-            .chars()
-            .all(|c| (c >= '\u{0590}' && c <= '\u{05FF}') || c == '׳' || c == '״');
-        if looks_hebrew && word_he_lower.chars().count() >= 3 {
-            final_he = true;
-            Some(Language::Hebrew)
-        } else {
-            None
-        }
     } else {
         None
     };
@@ -160,9 +148,41 @@ fn check_and_switch_candidates(
     if let Some(lang) = target_lang {
         let switched = switch_layout_to(lang);
         println!("switching: {}", if switched { "True" } else { "False" });
+        switched
     } else {
         println!("switching: False");
+        false
     }
+}
+
+fn replace_word(keys: Vec<Key>, terminating_key: Key) {
+    use std::thread;
+    use std::time::Duration;
+
+    // Small delay to ensure the terminating key has been processed by the OS
+    thread::sleep(Duration::from_millis(50));
+
+    // Delete terminating key + word characters
+    let delete_count = keys.len() + 1;
+    for _ in 0..delete_count {
+        let _ = simulate(&EventType::KeyPress(Key::Backspace));
+        let _ = simulate(&EventType::KeyRelease(Key::Backspace));
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Small delay to allow the OS to process layout switch
+    thread::sleep(Duration::from_millis(30));
+
+    // Retype the original physical keys
+    for key in keys {
+        let _ = simulate(&EventType::KeyPress(key));
+        let _ = simulate(&EventType::KeyRelease(key));
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Retype the terminating key
+    let _ = simulate(&EventType::KeyPress(terminating_key));
+    let _ = simulate(&EventType::KeyRelease(terminating_key));
 }
 
 fn switch_layout_to(lang: Language) -> bool {
@@ -183,7 +203,6 @@ fn switch_layout_to(lang: Language) -> bool {
         let current_src = TISCopyCurrentKeyboardInputSource();
         let mut switched = false;
 
-        // If current source is unknown, or not equal to the target source, we switch
         if current_src.is_null() || core_foundation_sys::base::CFEqual(src as CFTypeRef, current_src as CFTypeRef) == 0 {
             let status = TISSelectInputSource(src);
             if status != 0 {
@@ -252,12 +271,10 @@ fn key_to_hebrew_char(key: Key) -> Option<char> {
     match key {
         Key::KeyQ => Some('ק'),
         Key::KeyW => Some('ו'),
-        Key::KeyE => Some('ק'), // placeholder; adjust as needed
+        Key::KeyE => Some('ק'),
         Key::KeyR => Some('ר'),
         Key::KeyT => Some('ת'),
         Key::KeyY => Some('י'),
-        // Adjusted mapping so that the physical key sequence "akuo"
-        // corresponds to the Hebrew word "שלום".
         Key::KeyU => Some('ו'),
         Key::KeyI => Some('ט'),
         Key::KeyO => Some('ם'),
