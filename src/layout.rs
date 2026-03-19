@@ -59,6 +59,119 @@ pub fn switch_layout_to(lang: Language) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Windows: switch layout via HKL activation (LoadKeyboardLayoutW)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+pub fn switch_layout_to(lang: Language) -> bool {
+    use std::ffi::c_void;
+    use std::thread;
+    use std::time::Duration;
+
+    type DWORD = u32;
+    type HKL = isize;
+    type HWND = *mut c_void;
+    type WPARAM = usize;
+    type LPARAM = isize;
+    type BOOL = i32;
+
+    const KLF_ACTIVATE: u32 = 0x00000001;
+    const WM_INPUTLANGCHANGEREQUEST: u32 = 0x0050;
+    const INPUTLANGCHANGE_SYSCHARSET: WPARAM = 0x0001;
+
+    extern "system" {
+        fn GetForegroundWindow() -> HWND;
+        fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
+        fn GetCurrentThreadId() -> DWORD;
+        fn GetKeyboardLayout(idThread: DWORD) -> HKL;
+        fn PostMessageW(hWnd: HWND, Msg: u32, wParam: WPARAM, lParam: LPARAM) -> BOOL;
+        fn GetKeyboardLayoutList(nBuff: i32, lpList: *mut HKL) -> i32;
+        fn ActivateKeyboardLayout(hkl: HKL, Flags: u32) -> HKL;
+        fn LoadKeyboardLayoutW(pwszKLID: *const u16, Flags: u32) -> HKL;
+    }
+
+    // NOTE: KLID strings vary by Windows / keyboard layout variant.
+    // For example, Hebrew Standard is commonly `0002040d` (not `0000040d`).
+    let (desired_langid, klids): (u16, &[&str]) = match lang {
+        // English (United States)
+        Language::English => (0x0409u16, &["00000409"]),
+        // Hebrew (Israel)
+        Language::Hebrew => (0x040du16, &["0002040d", "0000040d"]),
+    };
+
+    unsafe {
+        // Determine the active keyboard layout of the foreground window's thread.
+        let hwnd = GetForegroundWindow();
+        let tid = if !hwnd.is_null() {
+            let mut pid: DWORD = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid)
+        } else {
+            GetCurrentThreadId()
+        };
+
+        // Find an installed keyboard layout whose LANGID matches.
+        let mut installed: Vec<HKL> = vec![0 as HKL; 64];
+        let count = GetKeyboardLayoutList(installed.len() as i32, installed.as_mut_ptr());
+        let installed_hkl = if count > 0 {
+            installed[..(count as usize)]
+                .iter()
+                .copied()
+                .find(|h| (*h as usize & 0xFFFF) as u16 == desired_langid)
+        } else {
+            None
+        };
+
+        let target_hkl: HKL = if let Some(hkl) = installed_hkl {
+            hkl
+        } else {
+            // Fallback: try to load/activate known KLIDs.
+            let mut loaded_hkl: HKL = 0;
+            for klid in klids {
+                let wide: Vec<u16> =
+                    klid.encode_utf16().chain(std::iter::once(0)).collect();
+                let hkl = LoadKeyboardLayoutW(wide.as_ptr(), KLF_ACTIVATE);
+                if hkl != 0 {
+                    loaded_hkl = hkl;
+                    break;
+                }
+            }
+            loaded_hkl
+        };
+
+        if target_hkl == 0 {
+            return false;
+        }
+
+        // Prefer notifying the focused window (foreground thread) to switch.
+        // This is more reliable than ActivateKeyboardLayout alone.
+        let posted_ok = if !hwnd.is_null() {
+            PostMessageW(
+                hwnd,
+                WM_INPUTLANGCHANGEREQUEST,
+                INPUTLANGCHANGE_SYSCHARSET,
+                target_hkl as LPARAM,
+            ) != 0
+        } else {
+            false
+        };
+
+        if !posted_ok {
+            // Fallback: activate for current thread (may not affect the
+            // foreground app, but keeps behavior best-effort).
+            let hkl = ActivateKeyboardLayout(target_hkl, KLF_ACTIVATE);
+            if hkl == 0 {
+                return false;
+            }
+        }
+
+        // Give the input subsystem time to apply the change.
+        thread::sleep(Duration::from_millis(180));
+        let updated_hkl = GetKeyboardLayout(tid);
+        let updated_langid = (updated_hkl as usize & 0xFFFF) as u16;
+        updated_langid == desired_langid
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // macOS: switch layout via TIS (Carbon framework)
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "macos")]

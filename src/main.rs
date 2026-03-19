@@ -28,4 +28,7 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     platform::macos::run(en_dict, he_dict);
+
+    #[cfg(target_os = "windows")]
+    platform::windows::run(en_dict, he_dict);
 }

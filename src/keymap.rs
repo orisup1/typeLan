@@ -42,7 +42,7 @@ pub fn evkey_to_hebrew_char(key: evdev::KeyCode) -> Option<char> {
 // ─────────────────────────────────────────────────────────────────────────────
 // macOS key → character mappings
 // ─────────────────────────────────────────────────────────────────────────────
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn key_to_english_char(key: rdev::Key) -> Option<char> {
     use rdev::Key as K;
     match key {
@@ -63,7 +63,7 @@ pub fn key_to_english_char(key: rdev::Key) -> Option<char> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn key_to_hebrew_char(key: rdev::Key) -> Option<char> {
     use rdev::Key as K;
     match key {

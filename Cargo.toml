@@ -10,6 +10,9 @@ rdev = "0.5.3"
 core-foundation = "0.9"
 core-foundation-sys = "0.8"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+rdev = "0.5.3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13.2"
 
