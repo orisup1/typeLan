@@ -108,6 +108,13 @@ pub fn switch_layout_to(lang: Language) -> bool {
             GetCurrentThreadId()
         };
 
+        // if the current layout already matches the desired one.
+        let current_hkl = GetKeyboardLayout(tid);
+        let current_langid = (current_hkl as usize & 0xFFFF) as u16;
+        if current_langid == desired_langid {
+            return false;
+        }
+
         // Find an installed keyboard layout whose LANGID matches.
         let mut installed: Vec<HKL> = vec![0 as HKL; 64];
         let count = GetKeyboardLayoutList(installed.len() as i32, installed.as_mut_ptr());
@@ -155,8 +162,7 @@ pub fn switch_layout_to(lang: Language) -> bool {
         };
 
         if !posted_ok {
-            // Fallback: activate for current thread (may not affect the
-            // foreground app, but keeps behavior best-effort).
+            // Fallback: activate for current thread
             let hkl = ActivateKeyboardLayout(target_hkl, KLF_ACTIVATE);
             if hkl == 0 {
                 return false;
