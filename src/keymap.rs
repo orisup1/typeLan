@@ -26,15 +26,24 @@ pub fn evkey_to_english_char(key: evdev::KeyCode) -> Option<char> {
 pub fn evkey_to_hebrew_char(key: evdev::KeyCode) -> Option<char> {
     use evdev::KeyCode as K;
     match key {
-        K::KEY_Q => Some('ק'), K::KEY_W => Some('ו'), K::KEY_E => Some('ק'),
-        K::KEY_R => Some('ר'), K::KEY_T => Some('ת'), K::KEY_Y => Some('י'),
-        K::KEY_U => Some('ו'), K::KEY_I => Some('ט'), K::KEY_O => Some('ם'),
+        K::KEY_Q => Some('/'), K::KEY_W => Some('\''), K::KEY_E => Some('ק'),
+        K::KEY_R => Some('ר'), K::KEY_T => Some('א'), K::KEY_Y => Some('ט'),
+        K::KEY_U => Some('ו'), K::KEY_I => Some('ן'), K::KEY_O => Some('ם'),
         K::KEY_P => Some('פ'), K::KEY_A => Some('ש'), K::KEY_S => Some('ד'),
         K::KEY_D => Some('ג'), K::KEY_F => Some('כ'), K::KEY_G => Some('ע'),
         K::KEY_H => Some('י'), K::KEY_J => Some('ח'), K::KEY_K => Some('ל'),
-        K::KEY_L => Some('ך'), K::KEY_Z => Some('ז'), K::KEY_X => Some('ס'),
-        K::KEY_C => Some('ב'), K::KEY_V => Some('ה'), K::KEY_B => Some('נ'),
-        K::KEY_N => Some('מ'), K::KEY_M => Some('צ'),
+        K::KEY_L => Some('ך'), K::KEY_SEMICOLON => Some('ף'), K::KEY_APOSTROPHE => Some(','),
+        K::KEY_Z => Some('ז'), K::KEY_X => Some('ס'), K::KEY_C => Some('ב'),
+        K::KEY_V => Some('ה'), K::KEY_B => Some('נ'), K::KEY_N => Some('מ'),
+        K::KEY_M => Some('צ'), K::KEY_COMMA => Some('ת'), K::KEY_DOT => Some('ץ'),
+        K::KEY_SLASH => Some('.'), K::KEY_GRAVE => Some(';'), K::KEY_LEFTBRACE => Some(']'),
+        K::KEY_RIGHTBRACE => Some('['), K::KEY_MINUS => Some('-'), K::KEY_EQUAL => Some('='),
+        K::KEY_BACKSLASH => Some('\\'),
+        // Numbers
+        K::KEY_1 => Some('1'), K::KEY_2 => Some('2'), K::KEY_3 => Some('3'),
+        K::KEY_4 => Some('4'), K::KEY_5 => Some('5'), K::KEY_6 => Some('6'),
+        K::KEY_7 => Some('7'), K::KEY_8 => Some('8'), K::KEY_9 => Some('9'),
+        K::KEY_0 => Some('0'),
         _ => None,
     }
 }
@@ -67,15 +76,24 @@ pub fn key_to_english_char(key: rdev::Key) -> Option<char> {
 pub fn key_to_hebrew_char(key: rdev::Key) -> Option<char> {
     use rdev::Key as K;
     match key {
-        K::KeyQ => Some('ק'), K::KeyW => Some('ו'), K::KeyE => Some('ק'),
-        K::KeyR => Some('ר'), K::KeyT => Some('ת'), K::KeyY => Some('י'),
-        K::KeyU => Some('ו'), K::KeyI => Some('ט'), K::KeyO => Some('ם'),
+        K::KeyQ => Some('/'), K::KeyW => Some('\''), K::KeyE => Some('ק'),
+        K::KeyR => Some('ר'), K::KeyT => Some('א'), K::KeyY => Some('ט'),
+        K::KeyU => Some('ו'), K::KeyI => Some('ן'), K::KeyO => Some('ם'),
         K::KeyP => Some('פ'), K::KeyA => Some('ש'), K::KeyS => Some('ד'),
         K::KeyD => Some('ג'), K::KeyF => Some('כ'), K::KeyG => Some('ע'),
         K::KeyH => Some('י'), K::KeyJ => Some('ח'), K::KeyK => Some('ל'),
-        K::KeyL => Some('ך'), K::KeyZ => Some('ז'), K::KeyX => Some('ס'),
-        K::KeyC => Some('ב'), K::KeyV => Some('ה'), K::KeyB => Some('נ'),
-        K::KeyN => Some('מ'), K::KeyM => Some('צ'),
+        K::KeyL => Some('ך'), K::SemiColon => Some('ף'), K::Quote => Some(','),
+        K::KeyZ => Some('ז'), K::KeyX => Some('ס'), K::KeyC => Some('ב'),
+        K::KeyV => Some('ה'), K::KeyB => Some('נ'), K::KeyN => Some('מ'),
+        K::KeyM => Some('צ'), K::Comma => Some('ת'), K::Dot => Some('ץ'),
+        K::Slash => Some('.'), K::BackQuote => Some(';'), K::LeftBracket => Some(']'),
+        K::RightBracket => Some('['), K::Minus => Some('-'), K::Equal => Some('='),
+        K::BackSlash => Some('\\'),
+        // Numbers
+        K::Num1 => Some('1'), K::Num2 => Some('2'), K::Num3 => Some('3'),
+        K::Num4 => Some('4'), K::Num5 => Some('5'), K::Num6 => Some('6'),
+        K::Num7 => Some('7'), K::Num8 => Some('8'), K::Num9 => Some('9'),
+        K::Num0 => Some('0'),
         _ => None,
     }
 }

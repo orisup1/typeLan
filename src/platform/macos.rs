@@ -8,24 +8,39 @@ use rdev::{listen, simulate, Event, EventType, Key};
 use crate::dictionary::check_and_switch_candidates;
 use crate::keymap::{key_to_english_char, key_to_hebrew_char};
 
+pub struct AppState {
+    pub keys: Vec<Key>,
+    pub is_replacing: bool,
+    pub buffered_keys: Vec<Key>,
+}
+
 pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
     println!("Starting typeLan keyboard watcher (macOS)...");
 
     let en_dict_cb = en_dict.clone();
     let he_dict_cb = he_dict.clone();
-    let current_keys: Arc<Mutex<Vec<Key>>> = Arc::new(Mutex::new(Vec::new()));
-    let keys_cb = Arc::clone(&current_keys);
+    let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState {
+        keys: Vec::new(),
+        is_replacing: false,
+        buffered_keys: Vec::new(),
+    }));
+    let state_cb = Arc::clone(&state);
 
     let callback = move |event: Event| {
-        let mut keys = keys_cb.lock().unwrap();
+        let mut st = state_cb.lock().unwrap();
         match event.event_type {
             EventType::KeyPress(key) => match key {
                 Key::Space | Key::Return => {
-                    if !keys.is_empty() {
+                    if st.is_replacing {
+                        st.buffered_keys.push(key);
+                        return;
+                    }
+
+                    if !st.keys.is_empty() {
                         let word_en: String =
-                            keys.iter().filter_map(|&k| key_to_english_char(k)).collect();
+                            st.keys.iter().filter_map(|&k| key_to_english_char(k)).collect();
                         let word_he: String =
-                            keys.iter().filter_map(|&k| key_to_hebrew_char(k)).collect();
+                            st.keys.iter().filter_map(|&k| key_to_hebrew_char(k)).collect();
                         let switched = check_and_switch_candidates(
                             &word_en,
                             &word_he,
@@ -33,34 +48,58 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                             &he_dict_cb,
                         );
                         if switched {
-                            let keys_clone = keys.clone();
+                            st.is_replacing = true;
+                            let keys_clone = st.keys.clone();
+                            let state_clone = Arc::clone(&state_cb);
+                            let terminator = key;
                             thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(50));
-                                let delete_count = keys_clone.len() + 1;
+                                thread::sleep(Duration::from_millis(20));
+                                
+                                let mut st_lock = state_clone.lock().unwrap();
+                                let buf = st_lock.buffered_keys.clone();
+                                
+                                let delete_count = keys_clone.len() + 1 + buf.len();
                                 for _ in 0..delete_count {
                                     let _ = simulate(&EventType::KeyPress(Key::Backspace));
                                     let _ = simulate(&EventType::KeyRelease(Key::Backspace));
-                                    thread::sleep(Duration::from_millis(1));
+                                    thread::sleep(Duration::from_micros(500));
                                 }
-                                thread::sleep(Duration::from_millis(30));
+                                thread::sleep(Duration::from_millis(5));
                                 for k in keys_clone {
                                     let _ = simulate(&EventType::KeyPress(k));
                                     let _ = simulate(&EventType::KeyRelease(k));
-                                    thread::sleep(Duration::from_millis(1));
+                                    thread::sleep(Duration::from_micros(500));
                                 }
-                                let _ = simulate(&EventType::KeyPress(Key::Space));
-                                let _ = simulate(&EventType::KeyRelease(Key::Space));
+                                let _ = simulate(&EventType::KeyPress(terminator));
+                                let _ = simulate(&EventType::KeyRelease(terminator));
+                                for k in buf.iter() {
+                                    let _ = simulate(&EventType::KeyPress(*k));
+                                    let _ = simulate(&EventType::KeyRelease(*k));
+                                    thread::sleep(Duration::from_micros(500));
+                                }
+                                
+                                st_lock.keys = buf;
+                                st_lock.buffered_keys.clear();
+                                st_lock.is_replacing = false;
                             });
                         }
-                        keys.clear();
+                        st.keys.clear();
                     }
                 }
                 Key::Backspace => {
-                    keys.pop();
+                    if st.is_replacing {
+                        st.buffered_keys.pop();
+                    } else {
+                        st.keys.pop();
+                    }
                 }
                 _ => {
                     if key_to_english_char(key).is_some() || key_to_hebrew_char(key).is_some() {
-                        keys.push(key);
+                        if st.is_replacing {
+                            st.buffered_keys.push(key);
+                        } else {
+                            st.keys.push(key);
+                        }
                     }
                 }
             },

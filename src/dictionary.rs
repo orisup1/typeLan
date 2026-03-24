@@ -45,15 +45,16 @@ pub fn check_and_switch_candidates(
     };
 
     println!("{}", word_en);
-    println!("English: {}", final_en);
-    println!("Hebrew: {}", final_he);
+    println!("{}", word_he);
+    println!("English: {}", if final_en { "True" } else { "False" });
+    println!("Hebrew: {}", if final_he { "True" } else { "False" });
 
     if let Some(lang) = target_lang {
         let switched = switch_layout_to(lang);
-        println!("switching: {}", if switched { "True" } else { "False" });
+        println!("Switch: {}", if switched { "True" } else { "False" });
         switched
     } else {
-        println!("switching: False");
+        println!("Switch: False");
         false
     }
 }

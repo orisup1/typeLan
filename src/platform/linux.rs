@@ -13,6 +13,8 @@ pub struct AppState {
     pub keys: Vec<KeyCode>,
     pub last_event_time: Instant,
     pub last_keycode: Option<KeyCode>,
+    pub is_replacing: bool,
+    pub buffered_keys: Vec<KeyCode>,
 }
 
 pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
@@ -79,6 +81,8 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
         keys: Vec::new(),
         last_event_time: Instant::now(),
         last_keycode: None,
+        is_replacing: false,
+        buffered_keys: Vec::new(),
     }));
 
     let en_dict = Arc::new(en_dict);
@@ -157,6 +161,11 @@ fn handle_key(
 
     match key {
         KC::KEY_SPACE | KC::KEY_ENTER | KC::KEY_KPENTER => {
+            if st.is_replacing {
+                st.buffered_keys.push(key);
+                return;
+            }
+
             if !st.keys.is_empty() {
                 let word_en: String = st
                     .keys
@@ -173,22 +182,32 @@ fn handle_key(
                     check_and_switch_candidates(&word_en, &word_he, en_dict, he_dict);
 
                 if switched {
+                    st.is_replacing = true;
                     let keys_clone = st.keys.clone();
                     let terminator = key;
                     let injector_clone = Arc::clone(injector);
+                    let state_clone = Arc::clone(state_mutex);
                     thread::spawn(move || {
-                        replace_word(keys_clone, terminator, &injector_clone);
+                        replace_word(keys_clone, terminator, &injector_clone, &state_clone);
                     });
                 }
                 st.keys.clear();
             }
         }
         KC::KEY_BACKSPACE => {
-            st.keys.pop();
+            if st.is_replacing {
+                st.buffered_keys.pop();
+            } else {
+                st.keys.pop();
+            }
         }
         _ => {
             if evkey_to_english_char(key).is_some() || evkey_to_hebrew_char(key).is_some() {
-                st.keys.push(key);
+                if st.is_replacing {
+                    st.buffered_keys.push(key);
+                } else {
+                    st.keys.push(key);
+                }
             }
         }
     }
@@ -199,6 +218,7 @@ fn replace_word(
     keys: Vec<KeyCode>,
     terminator: KeyCode,
     injector: &Arc<Mutex<VirtualDevice>>,
+    state_mutex: &Arc<Mutex<AppState>>,
 ) {
     use evdev::{EventType, InputEvent, KeyCode as KC, SynchronizationCode};
 
@@ -218,22 +238,25 @@ fn replace_word(
 
     let press_release = |kc: KC| {
         emit(kc, 1);
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(1));
         emit(kc, 0);
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(1));
     };
 
     // 1. Wait for the hyprctl layout switch to take effect in the compositor.
-    thread::sleep(Duration::from_millis(120));
+    thread::sleep(Duration::from_millis(20));
 
-    // 2. Erase the word (+1 for the terminator the user physically typed).
-    let delete_count = keys.len() + 1;
+    let mut st = state_mutex.lock().unwrap();
+    let buffered = st.buffered_keys.clone();
+
+    // 2. Erase the word (+1 for the terminator the user physically typed) + buffered keys.
+    let delete_count = keys.len() + 1 + buffered.len();
     for _ in 0..delete_count {
         press_release(KC::KEY_BACKSPACE);
     }
 
     // Slight pause between erase and retype.
-    thread::sleep(Duration::from_millis(20));
+    thread::sleep(Duration::from_millis(5));
 
     // 3. Retype the physical keys.
     for key in &keys {
@@ -242,4 +265,13 @@ fn replace_word(
 
     // 4. Retype the terminator.
     press_release(terminator);
+
+    // 5. Retype buffered keys.
+    for key in &buffered {
+        press_release(*key);
+    }
+
+    st.keys = st.buffered_keys.clone();
+    st.buffered_keys.clear();
+    st.is_replacing = false;
 }
