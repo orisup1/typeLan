@@ -63,16 +63,18 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
     thread::sleep(Duration::from_millis(300));
     let injector = Arc::new(Mutex::new(injector));
 
-    // Find all physical keyboard devices.
-    let keyboard_paths: Vec<std::path::PathBuf> = evdev::enumerate()
+    // Find all physical keyboard and mouse devices. Mice are included so
+    // that a click can reset the in-progress word buffer (parity with the
+    // macOS / Windows ButtonPress handler).
+    let device_paths: Vec<std::path::PathBuf> = evdev::enumerate()
         .filter_map(|(path, dev)| {
             if dev.name() == Some("typeLan-injector") {
                 return None;
             }
-            if dev
-                .supported_keys()
-                .map_or(false, |k| k.contains(KeyCode::KEY_A))
-            {
+            let keys = dev.supported_keys();
+            let is_keyboard = keys.map_or(false, |k| k.contains(KeyCode::KEY_A));
+            let is_mouse = keys.map_or(false, |k| k.contains(KeyCode::BTN_LEFT));
+            if is_keyboard || is_mouse {
                 Some(path)
             } else {
                 None
@@ -80,12 +82,12 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
         })
         .collect();
 
-    if keyboard_paths.is_empty() {
-        eprintln!("No keyboard devices found. Make sure you are in the 'input' group.");
+    if device_paths.is_empty() {
+        eprintln!("No input devices found. Make sure you are in the 'input' group.");
         return;
     }
 
-    println!("Found {} keyboard device(s).", keyboard_paths.len());
+    println!("Found {} input device(s).", device_paths.len());
 
     let state = Arc::new(Mutex::new(AppState {
         keys: Vec::new(),
@@ -101,7 +103,7 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
 
     let mut handles = vec![];
 
-    for path in keyboard_paths {
+    for path in device_paths {
         let state = Arc::clone(&state);
         let en_dict = Arc::clone(&en_dict);
         let he_dict = Arc::clone(&he_dict);
@@ -228,8 +230,8 @@ fn handle_key(
                 st.keys.pop();
             }
         }
-        // Cursor / focus-shifting keys end the current word without checking it,
-        // so a stale buffer doesn't leak into the next word.
+        // Cursor / focus-shifting keys and mouse clicks end the current word
+        // without checking it, so a stale buffer doesn't leak into the next word.
         KC::KEY_TAB
         | KC::KEY_ESC
         | KC::KEY_LEFT
@@ -241,7 +243,10 @@ fn handle_key(
         | KC::KEY_PAGEUP
         | KC::KEY_PAGEDOWN
         | KC::KEY_INSERT
-        | KC::KEY_DELETE => {
+        | KC::KEY_DELETE
+        | KC::BTN_LEFT
+        | KC::BTN_RIGHT
+        | KC::BTN_MIDDLE => {
             if st.is_replacing {
                 st.buffered_keys.clear();
             } else {

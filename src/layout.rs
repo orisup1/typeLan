@@ -108,6 +108,16 @@ pub fn switch_layout_to(lang: Language) -> bool {
             GetCurrentThreadId()
         };
 
+        // Pre-switch check: if the foreground window is already on the
+        // requested layout, skip the switch entirely. Mirrors the Linux
+        // hyprctl-based early-exit so check_and_switch_candidates returns
+        // false (no replacement) when typing in the correct layout already.
+        let current_hkl = GetKeyboardLayout(tid);
+        let current_langid = (current_hkl as usize & 0xFFFF) as u16;
+        if current_langid == desired_langid {
+            return false;
+        }
+
         // Find an installed keyboard layout whose LANGID matches.
         let mut installed: Vec<HKL> = vec![0 as HKL; 64];
         let count = GetKeyboardLayoutList(installed.len() as i32, installed.as_mut_ptr());

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rdev::{listen, simulate, Event, EventType, Key};
 
@@ -10,10 +10,19 @@ use crate::dictionary::check_and_switch_candidates;
 use crate::keymap::{key_to_english_char, key_to_hebrew_char};
 use crate::types::AppControl;
 
+/// Maximum time the replace thread will wait for the user to physically
+/// release the keys we are about to retype before injecting anyway.
+const HELD_RELEASE_TIMEOUT: Duration = Duration::from_millis(150);
+
 pub struct AppState {
     pub keys: Vec<Key>,
     pub is_replacing: bool,
     pub buffered_keys: Vec<Key>,
+    /// Physical keys currently held down. Tracked from press/release events
+    /// so the replace thread can wait for the user to lift the keys it is
+    /// about to retype — otherwise the OS sees the synthetic press as a
+    /// duplicate of the still-held physical key and drops it.
+    pub held_keys: HashSet<Key>,
 }
 
 pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppControl>) {
@@ -26,127 +35,114 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
         keys: Vec::new(),
         is_replacing: false,
         buffered_keys: Vec::new(),
+        held_keys: HashSet::new(),
     }));
     let state_cb = Arc::clone(&state);
     let injecting = Arc::new(AtomicBool::new(false));
     let injecting_cb = Arc::clone(&injecting);
 
     let callback = move |event: Event| {
-        // Ignore the key events we generate ourselves, otherwise the listener
-        // can treat them as user input and interfere with the replacement.
+        // Ignore the key events we generate ourselves; otherwise the listener
+        // treats them as user input and interferes with the replacement.
         if injecting_cb.load(Ordering::Relaxed) {
             return;
         }
 
         let mut st = state_cb.lock().unwrap();
         match event.event_type {
-            EventType::KeyPress(key) => match key {
-                Key::Space | Key::Return => {
-                    if st.is_replacing {
-                        st.buffered_keys.push(key);
-                        return;
-                    }
-
-                    if !st.keys.is_empty() {
-                        if !control_cb.is_enabled() {
-                            st.keys.clear();
-                            return;
-                        }
-                        let word_en: String =
-                            st.keys.iter().filter_map(|&k| key_to_english_char(k)).collect();
-                        let word_he: String =
-                            st.keys.iter().filter_map(|&k| key_to_hebrew_char(k)).collect();
-                        let switched = check_and_switch_candidates(
-                            &word_en,
-                            &word_he,
-                            &en_dict_cb,
-                            &he_dict_cb,
-                        );
-
-                        if switched {
-                            control_cb.record_fix();
-                            st.is_replacing = true;
-                            let keys_clone = st.keys.clone();
-                            let terminator = key;
-                            let state_clone = Arc::clone(&state_cb);
-                            injecting.store(true, Ordering::Relaxed);
-                            let injecting_flag = Arc::clone(&injecting_cb);
-
-                            thread::spawn(move || {
-                                // switch_layout_to already polled until the layout
-                                // change took effect, so no settle delay is needed.
-
-                                let mut st_lock = state_clone.lock().unwrap();
-                                let buf = st_lock.buffered_keys.clone();
-
-                                // +1 for the terminator the user physically typed.
-                                let delete_count = keys_clone.len() + 1 + buf.len();
-                                for _ in 0..delete_count {
-                                    let _ = simulate(&EventType::KeyPress(Key::Backspace));
-                                    let _ = simulate(&EventType::KeyRelease(Key::Backspace));
-                                    thread::sleep(Duration::from_micros(150));
-                                }
-
-                                for k in keys_clone {
-                                    let _ = simulate(&EventType::KeyPress(k));
-                                    let _ = simulate(&EventType::KeyRelease(k));
-                                    thread::sleep(Duration::from_micros(150));
-                                }
-
-                                let _ = simulate(&EventType::KeyPress(terminator));
-                                let _ = simulate(&EventType::KeyRelease(terminator));
-
-                                for k in buf.iter() {
-                                    let _ = simulate(&EventType::KeyPress(*k));
-                                    let _ = simulate(&EventType::KeyRelease(*k));
-                                    thread::sleep(Duration::from_micros(150));
-                                }
-
-                                st_lock.keys = buf;
-                                st_lock.buffered_keys.clear();
-                                st_lock.is_replacing = false;
-                                injecting_flag.store(false, Ordering::Relaxed);
-                            });
-                        }
-
-                        st.keys.clear();
-                    }
-                }
-                Key::Backspace => {
-                    if st.is_replacing {
-                        st.buffered_keys.pop();
-                    } else {
-                        st.keys.pop();
-                    }
-                }
-                Key::Tab
-                | Key::Escape
-                | Key::LeftArrow
-                | Key::RightArrow
-                | Key::UpArrow
-                | Key::DownArrow
-                | Key::Home
-                | Key::End
-                | Key::PageUp
-                | Key::PageDown
-                | Key::Insert
-                | Key::Delete => {
-                    if st.is_replacing {
-                        st.buffered_keys.clear();
-                    } else {
-                        st.keys.clear();
-                    }
-                }
-                _ => {
-                    if key_to_english_char(key).is_some() || key_to_hebrew_char(key).is_some() {
+            EventType::KeyPress(key) => {
+                st.held_keys.insert(key);
+                match key {
+                    Key::Space | Key::Return => {
                         if st.is_replacing {
                             st.buffered_keys.push(key);
+                            return;
+                        }
+
+                        if !st.keys.is_empty() {
+                            if !control_cb.is_enabled() {
+                                st.keys.clear();
+                                return;
+                            }
+                            let word_en: String = st
+                                .keys
+                                .iter()
+                                .filter_map(|&k| key_to_english_char(k))
+                                .collect();
+                            let word_he: String = st
+                                .keys
+                                .iter()
+                                .filter_map(|&k| key_to_hebrew_char(k))
+                                .collect();
+                            let switched = check_and_switch_candidates(
+                                &word_en,
+                                &word_he,
+                                &en_dict_cb,
+                                &he_dict_cb,
+                            );
+
+                            if switched {
+                                control_cb.record_fix();
+                                st.is_replacing = true;
+                                let keys_clone = st.keys.clone();
+                                let terminator = key;
+                                let state_clone = Arc::clone(&state_cb);
+                                let injecting_flag = Arc::clone(&injecting);
+
+                                thread::spawn(move || {
+                                    replace_word(
+                                        keys_clone,
+                                        terminator,
+                                        &state_clone,
+                                        &injecting_flag,
+                                    );
+                                });
+                            }
+
+                            st.keys.clear();
+                        }
+                    }
+                    Key::Backspace => {
+                        if st.is_replacing {
+                            st.buffered_keys.pop();
                         } else {
-                            st.keys.push(key);
+                            st.keys.pop();
+                        }
+                    }
+                    Key::Tab
+                    | Key::Escape
+                    | Key::LeftArrow
+                    | Key::RightArrow
+                    | Key::UpArrow
+                    | Key::DownArrow
+                    | Key::Home
+                    | Key::End
+                    | Key::PageUp
+                    | Key::PageDown
+                    | Key::Insert
+                    | Key::Delete => {
+                        if st.is_replacing {
+                            st.buffered_keys.clear();
+                        } else {
+                            st.keys.clear();
+                        }
+                    }
+                    _ => {
+                        if key_to_english_char(key).is_some()
+                            || key_to_hebrew_char(key).is_some()
+                        {
+                            if st.is_replacing {
+                                st.buffered_keys.push(key);
+                            } else {
+                                st.keys.push(key);
+                            }
                         }
                     }
                 }
-            },
+            }
+            EventType::KeyRelease(key) => {
+                st.held_keys.remove(&key);
+            }
             EventType::ButtonPress(_) => {
                 if st.is_replacing {
                     st.buffered_keys.clear();
@@ -164,3 +160,70 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
     }
 }
 
+/// After a layout switch, erase the mistyped word and retype it in the new layout.
+fn replace_word(
+    keys: Vec<Key>,
+    terminator: Key,
+    state_mutex: &Arc<Mutex<AppState>>,
+    injecting: &Arc<AtomicBool>,
+) {
+    // 1. Wait for the user to physically release the terminator and any of
+    //    the word's keys before injecting. injecting=false here so release
+    //    events from the listener still update held_keys.
+    let mut keys_of_interest: HashSet<Key> = keys.iter().copied().collect();
+    keys_of_interest.insert(terminator);
+    let wait_start = Instant::now();
+    loop {
+        let still_held = {
+            let st = state_mutex.lock().unwrap();
+            keys_of_interest.iter().any(|k| st.held_keys.contains(k))
+        };
+        if !still_held {
+            break;
+        }
+        if wait_start.elapsed() >= HELD_RELEASE_TIMEOUT {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    // 2. switch_layout_to already polled until the layout change took effect,
+    //    so no settle delay is needed here.
+
+    // 3. Gate the listener now that we are about to inject our own events.
+    injecting.store(true, Ordering::Relaxed);
+
+    let buf = {
+        let st = state_mutex.lock().unwrap();
+        st.buffered_keys.clone()
+    };
+
+    // +1 for the terminator the user physically typed.
+    let delete_count = keys.len() + 1 + buf.len();
+    for _ in 0..delete_count {
+        let _ = simulate(&EventType::KeyPress(Key::Backspace));
+        let _ = simulate(&EventType::KeyRelease(Key::Backspace));
+        thread::sleep(Duration::from_micros(150));
+    }
+
+    for k in &keys {
+        let _ = simulate(&EventType::KeyPress(*k));
+        let _ = simulate(&EventType::KeyRelease(*k));
+        thread::sleep(Duration::from_micros(150));
+    }
+
+    let _ = simulate(&EventType::KeyPress(terminator));
+    let _ = simulate(&EventType::KeyRelease(terminator));
+
+    for k in buf.iter() {
+        let _ = simulate(&EventType::KeyPress(*k));
+        let _ = simulate(&EventType::KeyRelease(*k));
+        thread::sleep(Duration::from_micros(150));
+    }
+
+    let mut st = state_mutex.lock().unwrap();
+    st.keys = buf;
+    st.buffered_keys.clear();
+    st.is_replacing = false;
+    injecting.store(false, Ordering::Relaxed);
+}
