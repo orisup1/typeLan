@@ -8,6 +8,7 @@ use rdev::{listen, simulate, Event, EventType, Key};
 
 use crate::dictionary::check_and_switch_candidates;
 use crate::keymap::{key_to_english_char, key_to_hebrew_char};
+use crate::types::AppControl;
 
 pub struct AppState {
     pub keys: Vec<Key>,
@@ -15,11 +16,12 @@ pub struct AppState {
     pub buffered_keys: Vec<Key>,
 }
 
-pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
+pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppControl>) {
     println!("Starting typeLan keyboard watcher (Windows)...");
 
     let en_dict_cb = en_dict.clone();
     let he_dict_cb = he_dict.clone();
+    let control_cb = Arc::clone(&control);
     let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState {
         keys: Vec::new(),
         is_replacing: false,
@@ -46,6 +48,10 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                     }
 
                     if !st.keys.is_empty() {
+                        if !control_cb.is_enabled() {
+                            st.keys.clear();
+                            return;
+                        }
                         let word_en: String =
                             st.keys.iter().filter_map(|&k| key_to_english_char(k)).collect();
                         let word_he: String =
@@ -58,6 +64,7 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                         );
 
                         if switched {
+                            control_cb.record_fix();
                             st.is_replacing = true;
                             let keys_clone = st.keys.clone();
                             let terminator = key;
@@ -66,7 +73,8 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                             let injecting_flag = Arc::clone(&injecting_cb);
 
                             thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(20));
+                                // switch_layout_to already polled until the layout
+                                // change took effect, so no settle delay is needed.
 
                                 let mut st_lock = state_clone.lock().unwrap();
                                 let buf = st_lock.buffered_keys.clone();
@@ -76,14 +84,13 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                                 for _ in 0..delete_count {
                                     let _ = simulate(&EventType::KeyPress(Key::Backspace));
                                     let _ = simulate(&EventType::KeyRelease(Key::Backspace));
-                                    thread::sleep(Duration::from_micros(500));
+                                    thread::sleep(Duration::from_micros(150));
                                 }
 
-                                thread::sleep(Duration::from_millis(5));
                                 for k in keys_clone {
                                     let _ = simulate(&EventType::KeyPress(k));
                                     let _ = simulate(&EventType::KeyRelease(k));
-                                    thread::sleep(Duration::from_micros(500));
+                                    thread::sleep(Duration::from_micros(150));
                                 }
 
                                 let _ = simulate(&EventType::KeyPress(terminator));
@@ -92,7 +99,7 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                                 for k in buf.iter() {
                                     let _ = simulate(&EventType::KeyPress(*k));
                                     let _ = simulate(&EventType::KeyRelease(*k));
-                                    thread::sleep(Duration::from_micros(500));
+                                    thread::sleep(Duration::from_micros(150));
                                 }
 
                                 st_lock.keys = buf;
@@ -112,6 +119,24 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                         st.keys.pop();
                     }
                 }
+                Key::Tab
+                | Key::Escape
+                | Key::LeftArrow
+                | Key::RightArrow
+                | Key::UpArrow
+                | Key::DownArrow
+                | Key::Home
+                | Key::End
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Insert
+                | Key::Delete => {
+                    if st.is_replacing {
+                        st.buffered_keys.clear();
+                    } else {
+                        st.keys.clear();
+                    }
+                }
                 _ => {
                     if key_to_english_char(key).is_some() || key_to_hebrew_char(key).is_some() {
                         if st.is_replacing {
@@ -122,6 +147,13 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
                     }
                 }
             },
+            EventType::ButtonPress(_) => {
+                if st.is_replacing {
+                    st.buffered_keys.clear();
+                } else {
+                    st.keys.clear();
+                }
+            }
             _ => {}
         }
     };

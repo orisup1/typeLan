@@ -5,8 +5,13 @@ use std::time::{Duration, Instant};
 
 use evdev::{uinput::VirtualDevice, AttributeSet, Device, EventSummary, KeyCode};
 
+/// Maximum time `replace_word` will wait for the user to physically release
+/// the keys we are about to retype before injecting anyway.
+const HELD_RELEASE_TIMEOUT: Duration = Duration::from_millis(150);
+
 use crate::dictionary::check_and_switch_candidates;
 use crate::keymap::{evkey_to_english_char, evkey_to_hebrew_char};
+use crate::types::AppControl;
 
 /// Per-keyboard state tracked across events.
 pub struct AppState {
@@ -15,9 +20,14 @@ pub struct AppState {
     pub last_keycode: Option<KeyCode>,
     pub is_replacing: bool,
     pub buffered_keys: Vec<KeyCode>,
+    /// Physical keys currently held down. Tracked from press/release events
+    /// so the replace_word thread can wait for the user to lift the keys it
+    /// is about to retype — otherwise the compositor squashes our synthetic
+    /// press as a duplicate of the still-held physical key.
+    pub held_keys: HashSet<KeyCode>,
 }
 
-pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
+pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppControl>) {
     println!("Starting typeLan keyboard watcher (Linux/Wayland)...");
 
     // Persistent virtual device strictly for injecting backspaces and
@@ -83,6 +93,7 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
         last_keycode: None,
         is_replacing: false,
         buffered_keys: Vec::new(),
+        held_keys: HashSet::new(),
     }));
 
     let en_dict = Arc::new(en_dict);
@@ -95,6 +106,7 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
         let en_dict = Arc::clone(&en_dict);
         let he_dict = Arc::clone(&he_dict);
         let injector = Arc::clone(&injector);
+        let control = Arc::clone(&control);
         let path_clone = path.clone();
 
         let handle = thread::spawn(move || {
@@ -120,9 +132,17 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>) {
 
                 for event in events {
                     if let EventSummary::Key(_, keycode, value) = event.destructure() {
-                        // Only process key presses (value == 1).
-                        if value == 1 {
-                            handle_key(keycode, &state, &en_dict, &he_dict, &injector);
+                        match value {
+                            1 => handle_key(
+                                keycode, &state, &en_dict, &he_dict, &injector, &control,
+                            ),
+                            0 => {
+                                // Track release so replace_word can wait until the
+                                // user has actually lifted the keys it needs to retype.
+                                let mut st = state.lock().unwrap();
+                                st.held_keys.remove(&keycode);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -144,6 +164,7 @@ fn handle_key(
     en_dict: &HashSet<String>,
     he_dict: &HashSet<String>,
     injector: &Arc<Mutex<VirtualDevice>>,
+    control: &Arc<AppControl>,
 ) {
     use evdev::KeyCode as KC;
 
@@ -158,6 +179,7 @@ fn handle_key(
     }
     st.last_event_time = now;
     st.last_keycode = Some(key);
+    st.held_keys.insert(key);
 
     match key {
         KC::KEY_SPACE | KC::KEY_ENTER | KC::KEY_KPENTER => {
@@ -167,6 +189,10 @@ fn handle_key(
             }
 
             if !st.keys.is_empty() {
+                if !control.is_enabled() {
+                    st.keys.clear();
+                    return;
+                }
                 let word_en: String = st
                     .keys
                     .iter()
@@ -182,6 +208,7 @@ fn handle_key(
                     check_and_switch_candidates(&word_en, &word_he, en_dict, he_dict);
 
                 if switched {
+                    control.record_fix();
                     st.is_replacing = true;
                     let keys_clone = st.keys.clone();
                     let terminator = key;
@@ -199,6 +226,26 @@ fn handle_key(
                 st.buffered_keys.pop();
             } else {
                 st.keys.pop();
+            }
+        }
+        // Cursor / focus-shifting keys end the current word without checking it,
+        // so a stale buffer doesn't leak into the next word.
+        KC::KEY_TAB
+        | KC::KEY_ESC
+        | KC::KEY_LEFT
+        | KC::KEY_RIGHT
+        | KC::KEY_UP
+        | KC::KEY_DOWN
+        | KC::KEY_HOME
+        | KC::KEY_END
+        | KC::KEY_PAGEUP
+        | KC::KEY_PAGEDOWN
+        | KC::KEY_INSERT
+        | KC::KEY_DELETE => {
+            if st.is_replacing {
+                st.buffered_keys.clear();
+            } else {
+                st.keys.clear();
             }
         }
         _ => {
@@ -238,16 +285,44 @@ fn replace_word(
 
     let press_release = |kc: KC| {
         emit(kc, 1);
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(Duration::from_micros(500));
         emit(kc, 0);
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(Duration::from_micros(500));
     };
 
-    // 1. Wait for the hyprctl layout switch to take effect in the compositor.
-    thread::sleep(Duration::from_millis(20));
+    // 1a. Wait for the user to physically release the terminator and any of
+    //     the word's keys. If we inject a synthetic press while the same key
+    //     is still held by the physical keyboard, the compositor sees it as
+    //     a duplicate of the held key and drops it — which is why the
+    //     trailing space (and occasionally the last word letter) went missing.
+    let mut keys_of_interest: HashSet<KeyCode> = keys.iter().copied().collect();
+    keys_of_interest.insert(terminator);
+    let wait_start = Instant::now();
+    loop {
+        let still_held = {
+            let st = state_mutex.lock().unwrap();
+            keys_of_interest.iter().any(|k| st.held_keys.contains(k))
+        };
+        if !still_held {
+            break;
+        }
+        if wait_start.elapsed() >= HELD_RELEASE_TIMEOUT {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 
-    let mut st = state_mutex.lock().unwrap();
-    let buffered = st.buffered_keys.clone();
+    // 1b. Wait for the hyprctl layout switch to take effect in the compositor.
+    thread::sleep(Duration::from_millis(15));
+
+    // Clone buffered keys while holding the lock, then release it before injecting
+    // any keys. The injected keystrokes re-enter handle_key which also needs the
+    // state lock, so holding it here would cause a deadlock that silently drops
+    // the injected space/terminator.
+    let buffered = {
+        let st = state_mutex.lock().unwrap();
+        st.buffered_keys.clone()
+    };
 
     // 2. Erase the word (+1 for the terminator the user physically typed) + buffered keys.
     let delete_count = keys.len() + 1 + buffered.len();
@@ -255,23 +330,34 @@ fn replace_word(
         press_release(KC::KEY_BACKSPACE);
     }
 
-    // Slight pause between erase and retype.
-    thread::sleep(Duration::from_millis(5));
-
     // 3. Retype the physical keys.
     for key in &keys {
         press_release(*key);
     }
 
-    // 4. Retype the terminator.
+    // Brief pause so the destination app has finished consuming the last
+    // word character before the terminator arrives. Without this gap the
+    // terminator is occasionally swallowed.
+    thread::sleep(Duration::from_millis(2));
+
+    // 4. Retype the terminator (space/enter). Lock is NOT held here so the
+    //    resulting handle_key call can acquire it without deadlocking.
     press_release(terminator);
+
+    thread::sleep(Duration::from_millis(2));
 
     // 5. Retype buffered keys.
     for key in &buffered {
         press_release(*key);
     }
 
-    st.keys = st.buffered_keys.clone();
+    // Re-acquire the lock only to clean up state.
+    let mut st = state_mutex.lock().unwrap();
+    st.keys = buffered.clone();
     st.buffered_keys.clear();
     st.is_replacing = false;
+    // Reset the dedup guard so the injected terminator (space/enter) is not
+    // silently dropped because it shares the same keycode as the physical
+    // keypress that triggered this replacement (both arrive within 5 ms).
+    st.last_keycode = None;
 }

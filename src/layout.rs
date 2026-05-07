@@ -163,11 +163,20 @@ pub fn switch_layout_to(lang: Language) -> bool {
             }
         }
 
-        // Give the input subsystem time to apply the change.
-        thread::sleep(Duration::from_millis(180));
-        let updated_hkl = GetKeyboardLayout(tid);
-        let updated_langid = (updated_hkl as usize & 0xFFFF) as u16;
-        updated_langid == desired_langid
+        // Poll for the input subsystem to apply the change instead of a fixed
+        // pessimistic sleep. Returns as soon as the layout flips, capped at 180 ms.
+        let deadline = std::time::Instant::now() + Duration::from_millis(180);
+        loop {
+            let updated_hkl = GetKeyboardLayout(tid);
+            let updated_langid = (updated_hkl as usize & 0xFFFF) as u16;
+            if updated_langid == desired_langid {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 }
 
