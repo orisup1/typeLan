@@ -9,7 +9,7 @@ use evdev::{uinput::VirtualDevice, AttributeSet, Device, EventSummary, KeyCode};
 /// the keys we are about to retype before injecting anyway.
 const HELD_RELEASE_TIMEOUT: Duration = Duration::from_millis(150);
 
-use crate::dictionary::check_and_switch_candidates;
+use crate::dictionary::check_and_switch_with_split;
 use crate::keymap::{evkey_to_english_char, evkey_to_hebrew_char};
 use crate::types::AppControl;
 
@@ -195,24 +195,22 @@ fn handle_key(
                     st.keys.clear();
                     return;
                 }
-                let word_en: String = st
-                    .keys
-                    .iter()
-                    .filter_map(|&k| evkey_to_english_char(k))
-                    .collect();
-                let word_he: String = st
-                    .keys
-                    .iter()
-                    .filter_map(|&k| evkey_to_hebrew_char(k))
-                    .collect();
+                let result = check_and_switch_with_split(
+                    &st.keys,
+                    evkey_to_english_char,
+                    evkey_to_hebrew_char,
+                    en_dict,
+                    he_dict,
+                );
 
-                let switched =
-                    check_and_switch_candidates(&word_en, &word_he, en_dict, he_dict);
-
-                if switched {
+                if let Some(start) = result {
                     control.record_fix();
                     st.is_replacing = true;
-                    let keys_clone = st.keys.clone();
+                    // Only the suffix from `start` onward is the word that
+                    // needs to be erased and retyped — anything before it is
+                    // a previously-typed word that the user concatenated by
+                    // forgetting a space, and we want to leave it intact.
+                    let keys_clone: Vec<KeyCode> = st.keys[start..].to_vec();
                     let terminator = key;
                     let injector_clone = Arc::clone(injector);
                     let state_clone = Arc::clone(state_mutex);

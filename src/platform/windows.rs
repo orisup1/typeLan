@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use rdev::{listen, simulate, Event, EventType, Key};
 
-use crate::dictionary::check_and_switch_candidates;
+use crate::dictionary::check_and_switch_with_split;
 use crate::keymap::{key_to_english_char, key_to_hebrew_char};
 use crate::types::AppControl;
 
@@ -64,27 +64,21 @@ pub fn run(en_dict: HashSet<String>, he_dict: HashSet<String>, control: Arc<AppC
                                 st.keys.clear();
                                 return;
                             }
-                            let word_en: String = st
-                                .keys
-                                .iter()
-                                .filter_map(|&k| key_to_english_char(k))
-                                .collect();
-                            let word_he: String = st
-                                .keys
-                                .iter()
-                                .filter_map(|&k| key_to_hebrew_char(k))
-                                .collect();
-                            let switched = check_and_switch_candidates(
-                                &word_en,
-                                &word_he,
+                            let result = check_and_switch_with_split(
+                                &st.keys,
+                                key_to_english_char,
+                                key_to_hebrew_char,
                                 &en_dict_cb,
                                 &he_dict_cb,
                             );
 
-                            if switched {
+                            if let Some(start) = result {
                                 control_cb.record_fix();
                                 st.is_replacing = true;
-                                let keys_clone = st.keys.clone();
+                                // See linux.rs: anything before `start` is a
+                                // previously-typed word the user concatenated
+                                // by forgetting a space; leave it untouched.
+                                let keys_clone: Vec<Key> = st.keys[start..].to_vec();
                                 let terminator = key;
                                 let state_clone = Arc::clone(&state_cb);
                                 let injecting_flag = Arc::clone(&injecting);

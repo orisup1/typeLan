@@ -30,28 +30,84 @@ and creates a `uinput` virtual device named `typeLan-injector` to replay correct
 ## Setup
 
 1. Install Rust (`rustup`, `cargo`).
-2. Place `en_dict.txt` and `he_dict.txt` in the working directory you launch from.
-   One word per line, lowercase.
-3. Make sure both English and Hebrew layouts are installed in your OS keyboard settings.
+2. Make sure both English and Hebrew layouts are installed in your OS keyboard settings.
    On Linux/Hyprland the xkb config must list English as layout 0 and Hebrew as layout 1.
 
-## Run
+The English and Hebrew dictionaries are baked into the binary at compile time, so the
+executable is self-contained and runs identically from any working directory — no data
+files or wrapper scripts to install.
+
+## Linux: full install + autostart
+
+One-shot setup. Adds your user to the `input` group (required for `evdev` access),
+builds in release mode, installs the binary to `~/.local/bin/typeLan`, and registers a
+`systemd --user` unit that starts typeLan at login:
 
 ```bash
-cargo run --release
+sudo usermod -aG input $USER && exec newgrp input <<< 'make service'
 ```
+
+`newgrp` applies the new group to the current shell so you don't have to log out;
+omit the `newgrp` part and re-login instead if you prefer. Make sure `~/.local/bin`
+is on your `PATH`.
+
+Manage the service:
+
+```bash
+systemctl --user status  typeLan       # health check
+systemctl --user restart typeLan       # apply a rebuild
+journalctl  --user -u    typeLan -f    # logs
+make service-uninstall                  # stop + remove the unit
+```
+
+### Other Make targets
+
+```bash
+make              # cargo build --release
+make install      # build + copy bin to ~/.local/bin
+make deploy       # clean + build + install
+make uninstall    # remove the installed bin
+make run ARGS=-g  # cargo run with the GUI flag
+make help         # full target list
+```
+
+Override the install root with `PREFIX=`, e.g. `make install PREFIX=/opt/typeLan`.
+
+## macOS
+
+```bash
+make service
+```
+
+Writes a launchd LaunchAgent at `~/Library/LaunchAgents/org.typeLan.plist` and starts it.
+You will need to grant the binary **Input Monitoring** and **Accessibility** permissions
+in System Settings → Privacy & Security the first time it runs.
+
+## Windows
+
+PowerShell:
+
+```powershell
+.\deploy.ps1 -Target service
+```
+
+Builds, installs to `%USERPROFILE%\.local\bin`, and registers a Scheduled Task that
+runs typeLan at logon. `.\deploy.ps1 -Target help` lists every target.
+
+## Running directly
+
+If you don't want a service, just run the binary (or `cargo run --release`) from any
+shell and leave it in the background.
 
 Pass `-g` (Linux only) to launch a small control window with an enable/disable
 switch and a counter of words fixed since startup:
 
 ```bash
-cargo run --release -- -g
+typeLan -g
 ```
 
 Set `TYPELAN_DEBUG=1` to print every word check and switch decision:
 
 ```bash
-TYPELAN_DEBUG=1 cargo run --release
+TYPELAN_DEBUG=1 typeLan
 ```
-
-Leave the process running in the background.

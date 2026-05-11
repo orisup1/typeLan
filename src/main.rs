@@ -6,28 +6,22 @@ mod layout;
 mod platform;
 mod types;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use dictionary::load_dictionary;
+use dictionary::parse_dictionary;
 use types::AppControl;
+
+// Dictionaries are baked into the binary at compile time so the executable is
+// self-contained — it loads identically no matter what the current working
+// directory is when launched.
+const EN_DICT_TXT: &str = include_str!("../en_dict.txt");
+const HE_DICT_TXT: &str = include_str!("../he_dict.txt");
 
 fn main() {
     let with_gui = std::env::args().skip(1).any(|a| a == "-g" || a == "--gui");
 
-    let en_dict = load_dictionary("en_dict.txt").unwrap_or_else(|e| {
-        eprintln!("Warning: Could not load English dictionary: {}", e);
-        HashSet::new()
-    });
-    let he_dict = load_dictionary("he_dict.txt").unwrap_or_else(|e| {
-        eprintln!("Warning: Could not load Hebrew dictionary: {}", e);
-        HashSet::new()
-    });
-
-    if en_dict.is_empty() || he_dict.is_empty() {
-        eprintln!("Fatal: At least one dictionary must be loaded. Shutting down.");
-        return;
-    }
+    let en_dict = parse_dictionary(EN_DICT_TXT);
+    let he_dict = parse_dictionary(HE_DICT_TXT);
 
     let control = Arc::new(AppControl::new());
 
