@@ -1,0 +1,89 @@
+use std::process;
+use std::sync::Arc;
+
+use tao::event::{Event, StartCause};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+use crate::types::AppControl;
+
+/// Run the menubar (macOS) / tray (Windows) on the calling thread.
+///
+/// Must be invoked from the main thread — `tao` creates the platform event
+/// loop here (NSApp on macOS, Win32 message pump on Windows) and both require
+/// the main thread.
+#[allow(unused_assignments)]
+pub fn run(control: Arc<AppControl>) {
+    #[allow(unused_mut)]
+    let mut builder = EventLoopBuilder::new();
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        // Accessory keeps the app out of the Dock and the Cmd-Tab switcher —
+        // it lives only in the menubar.
+        builder.with_activation_policy(ActivationPolicy::Accessory);
+    }
+    let event_loop = builder.build();
+
+    let menu = Menu::new();
+    let toggle_item = MenuItem::new(toggle_label(control.is_enabled()), true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    menu.append(&toggle_item).expect("append toggle");
+    menu.append(&quit_item).expect("append quit");
+
+    let toggle_id = toggle_item.id().clone();
+    let quit_id = quit_item.id().clone();
+    let menu_channel = MenuEvent::receiver();
+
+    // tray-icon (macOS) requires that the TrayIcon be created after the
+    // NSApplication has finished launching — i.e. inside the run loop, on
+    // StartCause::Init. `take()` on the Option ensures we only build once.
+    // `_tray` is held by the closure to keep the icon alive for the program's
+    // lifetime; we never read it back after construction.
+    let mut pending_menu: Option<Menu> = Some(menu);
+    let mut _tray: Option<TrayIcon> = None;
+
+    event_loop.run(move |event, _target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        if let Event::NewEvents(StartCause::Init) = event {
+            if let Some(menu) = pending_menu.take() {
+                let icon = placeholder_icon();
+                #[allow(unused_mut)]
+                let mut tray_builder = TrayIconBuilder::new()
+                    .with_menu(Box::new(menu))
+                    .with_tooltip("TypeLan")
+                    .with_icon(icon);
+                #[cfg(target_os = "macos")]
+                {
+                    tray_builder = tray_builder.with_title("TypeLan");
+                }
+                _tray = Some(tray_builder.build().expect("tray build"));
+            }
+        }
+
+        while let Ok(event) = menu_channel.try_recv() {
+            if event.id == toggle_id {
+                let new_enabled = !control.is_enabled();
+                control.set_enabled(new_enabled);
+                toggle_item.set_text(toggle_label(new_enabled));
+            } else if event.id == quit_id {
+                process::exit(0);
+            }
+        }
+    });
+}
+
+fn toggle_label(enabled: bool) -> &'static str {
+    if enabled { "Disable" } else { "Enable" }
+}
+
+fn placeholder_icon() -> Icon {
+    let size: u32 = 16;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for _ in 0..(size * size) {
+        rgba.extend_from_slice(&[20, 120, 200, 255]);
+    }
+    Icon::from_rgba(rgba, size, size).expect("icon build")
+}

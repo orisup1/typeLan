@@ -39,6 +39,7 @@ impl eframe::App for App {
 pub fn run(control: Arc<AppControl>) -> Result<(), eframe::Error> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_fullscreen(true)
             .with_inner_size([260.0, 140.0])
             .with_resizable(false),
         ..Default::default()

@@ -45,12 +45,22 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         let _ = with_gui; // GUI flag is currently Linux-only.
-        platform::macos::run(en_dict, he_dict, control);
+        let listener_control = Arc::clone(&control);
+        std::thread::spawn(move || {
+            platform::macos::run(en_dict, he_dict, listener_control);
+        });
+        // Menubar event loop must own the main thread (NSApp requirement).
+        platform::tray::run(control);
     }
 
     #[cfg(target_os = "windows")]
     {
         let _ = with_gui;
-        platform::windows::run(en_dict, he_dict, control);
+        let listener_control = Arc::clone(&control);
+        std::thread::spawn(move || {
+            platform::windows::run(en_dict, he_dict, listener_control);
+        });
+        // Tray event loop must own the main thread (Win32 message pump).
+        platform::tray::run(control);
     }
 }
