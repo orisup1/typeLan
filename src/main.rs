@@ -45,10 +45,12 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         let _ = with_gui; // GUI flag is currently Linux-only.
-        let listener_control = Arc::clone(&control);
-        std::thread::spawn(move || {
-            platform::macos::run(en_dict, he_dict, listener_control);
-        });
+        // Attach the CGEventTap to the main run loop *before* tao takes it
+        // over. The tap callback fires from inside NSApp's event loop, so no
+        // background thread is involved — running it on a side thread (the
+        // earlier design) made macOS terminate the process after ~2s.
+        // `_tap` must outlive `tray::run`; dropping it releases the tap.
+        let _tap = platform::macos::setup_event_tap(en_dict, he_dict, Arc::clone(&control));
         // Menubar event loop must own the main thread (NSApp requirement).
         platform::tray::run(control);
     }

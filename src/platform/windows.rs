@@ -178,7 +178,7 @@ fn replace_word(
         if wait_start.elapsed() >= HELD_RELEASE_TIMEOUT {
             break;
         }
-        thread::sleep(Duration::from_millis(2));
+        thread::sleep(Duration::from_micros(500));
     }
 
     // 2. switch_layout_to already polled until the layout change took effect,

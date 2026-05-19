@@ -288,9 +288,9 @@ fn replace_word(
 
     let press_release = |kc: KC| {
         emit(kc, 1);
-        thread::sleep(Duration::from_micros(500));
+        thread::sleep(Duration::from_micros(150));
         emit(kc, 0);
-        thread::sleep(Duration::from_micros(500));
+        thread::sleep(Duration::from_micros(150));
     };
 
     // 1a. Wait for the user to physically release the terminator and any of
@@ -312,11 +312,14 @@ fn replace_word(
         if wait_start.elapsed() >= HELD_RELEASE_TIMEOUT {
             break;
         }
-        thread::sleep(Duration::from_millis(2));
+        thread::sleep(Duration::from_micros(500));
     }
 
     // 1b. Wait for the hyprctl layout switch to take effect in the compositor.
-    thread::sleep(Duration::from_millis(15));
+    //     hyprctl returns synchronously, so this is only the compositor's
+    //     internal absorption gap — 8 ms matches the macOS TIS-settle and
+    //     is enough in practice on Hyprland.
+    thread::sleep(Duration::from_millis(8));
 
     // Clone buffered keys while holding the lock, then release it before injecting
     // any keys. The injected keystrokes re-enter handle_key which also needs the

@@ -29,6 +29,21 @@ pub fn parse_dictionary(content: &str) -> HashSet<String> {
         // ASCII-only lowercase: faster than Unicode `to_lowercase`. Hebrew has
         // no case, English entries are ASCII, so byte-level folding suffices.
         let lower = word.to_ascii_lowercase();
+        // Drop short all-consonant ASCII entries (e.g. "nv", "bf", "kg", "mm",
+        // "mfg", "brr"). The English word list is polluted with abbreviations
+        // and unit symbols that collide with Hebrew words when the same key
+        // sequence is read as Hebrew — typing "מה" produces "nv" under the
+        // English layout, and "nv" being a dict hit made `decide_target_lang`
+        // see both languages as valid and refuse to switch. Real English
+        // words always contain a vowel (a/e/i/o/u/y), so length ≤ 3 with no
+        // vowel is a safe pollution filter. Hebrew entries are non-ASCII and
+        // are unaffected by this gate.
+        if lower.len() <= 3
+            && lower.is_ascii()
+            && !lower.bytes().any(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'y'))
+        {
+            continue;
+        }
         if lower.bytes().any(|b| b == b'\'' || b == b'"') {
             let stripped: String =
                 lower.chars().filter(|c| *c != '\'' && *c != '"').collect();
@@ -149,29 +164,66 @@ pub fn check_and_switch_with_split<K: Copy>(
     if keys.is_empty() {
         return None;
     }
-    let build = |slice: &[K]| -> (String, String) {
-        let en: String = slice.iter().filter_map(|&k| to_en(k)).collect();
-        let he: String = slice.iter().filter_map(|&k| to_he(k)).collect();
-        (en, he)
-    };
+
+    // Build the full English/Hebrew folds once and record where each key's
+    // char lands in the resulting `String`s. Splits then slice into the
+    // precomputed buffers instead of re-walking the key vector twice per
+    // split point — drops the fallback scan from O(N²) to O(N).
+    //
+    // `offsets_*[k]` is the byte offset *after* the first k keys have been
+    // folded, so `&full_en[..offsets_en[k]]` is the prefix for `keys[..k]`
+    // and `&full_en[offsets_en[k]..]` is the suffix for `keys[k..]`. Same
+    // for Hebrew. Length is `keys.len() + 1`.
+    let mut full_en = String::with_capacity(keys.len());
+    let mut full_he = String::with_capacity(keys.len() * 2);
+    let mut offsets_en = Vec::with_capacity(keys.len() + 1);
+    let mut offsets_he = Vec::with_capacity(keys.len() + 1);
+    offsets_en.push(0);
+    offsets_he.push(0);
+    for &k in keys {
+        if let Some(c) = to_en(k) {
+            full_en.push(c);
+        }
+        if let Some(c) = to_he(k) {
+            full_he.push(c);
+        }
+        offsets_en.push(full_en.len());
+        offsets_he.push(full_he.len());
+    }
 
     // 1. Full-buffer attempt — preserves the original behaviour exactly.
-    let (full_en, full_he) = build(keys);
     if let Some(lang) = decide_target_lang(&full_en, &full_he, en_dict, he_dict) {
         let switched = switch_layout_to(lang);
         debug_log(&full_en, &full_he, Some(lang), switched);
         return if switched { Some(0) } else { None };
     }
 
+    // If the full buffer is itself a valid word in *either* dictionary, do
+    // not attempt the split fallback. We only get here when
+    // `decide_target_lang` returned `None`, which (since the buffer is
+    // non-empty) means the same keystrokes parse as a real word in BOTH
+    // languages. Splitting an already-valid ambiguous word is the main
+    // source of "I typed a real word and it got replaced anyway" — the
+    // split scanner happily finds some sub-interpretation in the other
+    // language and triggers a swap. Bail out and trust what the user typed.
+    let full_en_valid = !full_en.is_empty() && en_dict.contains(&full_en);
+    let full_he_valid = !full_he.is_empty() && he_dict.contains(&full_he);
+    if full_en_valid || full_he_valid {
+        debug_log(&full_en, &full_he, None, false);
+        return None;
+    }
+
     // 2. Split fallback. Scan split points from longest prefix to shortest;
     //    the first match leaves the most user-typed text intact.
     for split in (1..keys.len()).rev() {
-        let (prefix_en, prefix_he) = build(&keys[..split]);
-        if !is_known_word(&prefix_en, &prefix_he, en_dict, he_dict) {
+        let prefix_en = &full_en[..offsets_en[split]];
+        let prefix_he = &full_he[..offsets_he[split]];
+        if !is_known_word(prefix_en, prefix_he, en_dict, he_dict) {
             continue;
         }
-        let (suffix_en, suffix_he) = build(&keys[split..]);
-        let Some(lang) = decide_target_lang(&suffix_en, &suffix_he, en_dict, he_dict) else {
+        let suffix_en = &full_en[offsets_en[split]..];
+        let suffix_he = &full_he[offsets_he[split]..];
+        let Some(lang) = decide_target_lang(suffix_en, suffix_he, en_dict, he_dict) else {
             continue;
         };
         let switched = switch_layout_to(lang);
@@ -181,7 +233,7 @@ pub fn check_and_switch_with_split<K: Copy>(
                 split, prefix_en, prefix_he, suffix_en, suffix_he,
             );
         }
-        debug_log(&suffix_en, &suffix_he, Some(lang), switched);
+        debug_log(suffix_en, suffix_he, Some(lang), switched);
         if switched {
             return Some(split);
         }
