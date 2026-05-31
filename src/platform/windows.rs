@@ -178,7 +178,7 @@ fn replace_word(
         if wait_start.elapsed() >= HELD_RELEASE_TIMEOUT {
             break;
         }
-        thread::sleep(Duration::from_micros(500));
+        thread::sleep(Duration::from_micros(100));
     }
 
     // 2. switch_layout_to already polled until the layout change took effect,
@@ -197,13 +197,13 @@ fn replace_word(
     for _ in 0..delete_count {
         let _ = simulate(&EventType::KeyPress(Key::Backspace));
         let _ = simulate(&EventType::KeyRelease(Key::Backspace));
-        thread::sleep(Duration::from_micros(150));
+        thread::sleep(Duration::from_micros(50));
     }
 
     for k in &keys {
         let _ = simulate(&EventType::KeyPress(*k));
         let _ = simulate(&EventType::KeyRelease(*k));
-        thread::sleep(Duration::from_micros(150));
+        thread::sleep(Duration::from_micros(50));
     }
 
     let _ = simulate(&EventType::KeyPress(terminator));
@@ -212,7 +212,7 @@ fn replace_word(
     for k in buf.iter() {
         let _ = simulate(&EventType::KeyPress(*k));
         let _ = simulate(&EventType::KeyRelease(*k));
-        thread::sleep(Duration::from_micros(150));
+        thread::sleep(Duration::from_micros(50));
     }
 
     let mut st = state_mutex.lock().unwrap();
